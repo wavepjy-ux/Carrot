@@ -1,4 +1,5 @@
 import csv
+import gzip
 import json
 import queue
 import re
@@ -23,6 +24,7 @@ DEFAULT_HEADERS = {
     "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.7,en;q=0.6",
     "Cache-Control": "no-cache",
     "Pragma": "no-cache",
+    "Accept-Encoding": "gzip, deflate",
 }
 
 
@@ -40,7 +42,7 @@ class DaangnCrawler:
     def __init__(self, timeout: int = 15):
         self.timeout = timeout
 
-    def search(self, keyword: str, max_pages: int = 3, include_web_index: bool = True):
+    def search(self, keyword: str, max_pages: int = 3, include_sitemap_boost: bool = True):
         dedupe = set()
         results = []
 
@@ -50,9 +52,8 @@ class DaangnCrawler:
             dedupe.add(item.url)
             results.append(item)
 
-        if include_web_index:
-            # 웹 인덱스(검색엔진 색인)를 같이 모아 전국 범위 누락을 줄인다.
-            for item in self._search_from_web_index(keyword, max_pages):
+        if include_sitemap_boost:
+            for item in self._search_from_sitemap(keyword, max_pages):
                 if item.url in dedupe:
                     continue
                 dedupe.add(item.url)
@@ -62,91 +63,140 @@ class DaangnCrawler:
 
     def _search_from_daangn(self, keyword: str, max_pages: int):
         results = []
-        local_seen = set()
+        seen = set()
 
         for page in range(1, max_pages + 1):
-            html = self._fetch_page(keyword, page)
+            html = self._fetch_search_page(keyword, page)
             parsed = self._parse_from_json_ld(html)
             if not parsed:
                 parsed = self._parse_from_next_data(html)
             if not parsed:
                 parsed = self._parse_with_regex(html)
-
             if not parsed:
                 break
 
-            new_items = 0
+            new_count = 0
             for item in parsed:
-                if item.url in local_seen:
+                if item.url in seen:
                     continue
-                local_seen.add(item.url)
+                seen.add(item.url)
                 results.append(item)
-                new_items += 1
-
-            if new_items == 0:
+                new_count += 1
+            if new_count == 0:
                 break
 
         return results
 
-    def _search_from_web_index(self, keyword: str, max_pages: int):
-        # DuckDuckGo HTML 엔드포인트 사용 (API 키 없이 가능)
-        # site 제한으로 당근 글 URL만 추출
-        article_urls = []
-        seen = set()
-        pages = min(max_pages, 10)
-
-        for idx in range(pages):
-            start = idx * 30
-            q = f"site:daangn.com/kr/buy-sell/articles {keyword}"
-            query = urllib.parse.urlencode({"q": q, "s": start})
-            url = f"https://duckduckgo.com/html/?{query}"
-            try:
-                html = self._fetch_url(url)
-            except Exception:
-                continue
-
-            for link in self._extract_links_from_ddg(html):
-                if "/kr/buy-sell/articles/" not in link:
-                    continue
-                cleaned = self._normalize_article_url(link)
-                if cleaned in seen:
-                    continue
-                seen.add(cleaned)
-                article_urls.append(cleaned)
-
+    def _search_from_sitemap(self, keyword: str, max_pages: int):
+        keyword_norm = keyword.lower().strip()
         results = []
-        for article_url in article_urls[:200]:
+        article_urls = self._collect_article_urls_from_sitemaps(max_pages=max_pages)
+
+        # 느리지 않도록 상한
+        scan_limit = min(len(article_urls), max_pages * 120)
+        for article_url in article_urls[:scan_limit]:
             try:
-                html = self._fetch_url(article_url)
-                item = self._parse_listing_page(article_url, html)
-                results.append(item)
+                html = self._fetch_url_text(article_url)
+                listing = self._parse_listing_page(article_url, html)
             except Exception:
                 continue
+
+            hay = f"{listing.title} {listing.location}".lower()
+            if keyword_norm and keyword_norm not in hay:
+                # 제목/지역 외 본문 텍스트도 얕게 확인
+                if keyword_norm not in self._strip_html(html).lower():
+                    continue
+
+            listing.source = "sitemap"
+            results.append(listing)
+
         return results
 
-    def _fetch_page(self, keyword: str, page: int) -> str:
-        query = urllib.parse.urlencode({"in": "all", "search": keyword, "page": page})
-        url = f"{BASE_URL}?{query}"
-        return self._fetch_url(url)
+    def _collect_article_urls_from_sitemaps(self, max_pages: int):
+        sitemap_urls = self._discover_sitemap_urls()
+        article_urls = []
+        seen = set()
 
-    def _fetch_url(self, url: str) -> str:
+        # 최신 사이트맵 일부만 사용 (속도/부하 고려)
+        use_count = min(len(sitemap_urls), max_pages)
+        for sitemap_url in sitemap_urls[:use_count]:
+            try:
+                xml_text = self._fetch_url_text(sitemap_url)
+            except Exception:
+                continue
+
+            for loc in re.findall(r"<loc>(.*?)</loc>", xml_text, flags=re.IGNORECASE):
+                u = unescape(loc.strip())
+                if "/kr/buy-sell/articles/" not in u:
+                    continue
+                nu = self._normalize_article_url(u)
+                if nu in seen:
+                    continue
+                seen.add(nu)
+                article_urls.append(nu)
+
+        return article_urls
+
+    def _discover_sitemap_urls(self):
+        candidates = [
+            "https://www.daangn.com/sitemap.xml",
+            "https://www.daangn.com/sitemap_index.xml",
+            "https://www.daangn.com/sitemaps/sitemap-index.xml",
+        ]
+
+        discovered = []
+        for url in candidates:
+            try:
+                xml_text = self._fetch_url_text(url)
+            except Exception:
+                continue
+
+            locs = [unescape(x.strip()) for x in re.findall(r"<loc>(.*?)</loc>", xml_text, flags=re.IGNORECASE)]
+            # sitemap index 내에서 article 관련 sitemap 우선
+            article_first = [x for x in locs if "sitemap" in x.lower() and ("buy-sell" in x or "article" in x)]
+            all_sitemaps = [x for x in locs if "sitemap" in x.lower()]
+
+            ordered = article_first + [x for x in all_sitemaps if x not in article_first]
+            discovered.extend(ordered)
+
+            if discovered:
+                break
+
+        # 최신부터 오도록 역순 시도 (파일명이 날짜 오름차순인 경우 대비)
+        uniq = []
+        seen = set()
+        for u in discovered:
+            if u in seen:
+                continue
+            seen.add(u)
+            uniq.append(u)
+        uniq.reverse()
+        return uniq
+
+    def _fetch_search_page(self, keyword: str, page: int) -> str:
+        query = urllib.parse.urlencode({"in": "all", "search": keyword, "page": page})
+        return self._fetch_url_text(f"{BASE_URL}?{query}")
+
+    def _fetch_url_text(self, url: str) -> str:
         req = urllib.request.Request(url, headers=DEFAULT_HEADERS)
-        with urllib.request.urlopen(req, timeout=self.timeout) as response:
-            return response.read().decode("utf-8", errors="ignore")
+        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            raw = resp.read()
+            encoding = (resp.headers.get("Content-Encoding") or "").lower()
+
+        if raw[:2] == b"\x1f\x8b" or "gzip" in encoding or url.endswith(".gz"):
+            try:
+                raw = gzip.decompress(raw)
+            except OSError:
+                pass
+
+        return raw.decode("utf-8", errors="ignore")
 
     def _parse_from_json_ld(self, html: str):
         results = []
-        blocks = re.findall(
-            r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>',
-            html,
-            flags=re.DOTALL | re.IGNORECASE,
-        )
+        blocks = re.findall(r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>', html, flags=re.DOTALL | re.IGNORECASE)
         for block in blocks:
-            cleaned = block.strip()
-            if not cleaned:
-                continue
             try:
-                data = json.loads(cleaned)
+                data = json.loads(block.strip())
             except json.JSONDecodeError:
                 continue
 
@@ -172,37 +222,27 @@ class DaangnCrawler:
 
                 offers = item.get("offers") if isinstance(item.get("offers"), dict) else {}
                 price = str(offers.get("price", "가격 정보 없음")).strip()
+                area = item.get("areaServed") if isinstance(item.get("areaServed"), dict) else {}
+                location = str(area.get("name", "지역 정보 없음")).strip() or "지역 정보 없음"
 
-                location = "지역 정보 없음"
-                area = item.get("areaServed")
-                if isinstance(area, dict):
-                    location = str(area.get("name", location)).strip() or location
-
-                image_url = self._extract_image(item)
                 results.append(
                     Listing(
                         title=title,
                         price=price,
                         location=location,
                         url=self._normalize_article_url(raw_url),
-                        image_url=image_url,
+                        image_url=self._extract_image(item),
                         source="daangn",
                     )
                 )
-
         return results
 
     def _parse_from_next_data(self, html: str):
-        match = re.search(
-            r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>',
-            html,
-            flags=re.DOTALL | re.IGNORECASE,
-        )
-        if not match:
+        m = re.search(r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, flags=re.DOTALL | re.IGNORECASE)
+        if not m:
             return []
-
         try:
-            payload = json.loads(match.group(1).strip())
+            payload = json.loads(m.group(1).strip())
         except json.JSONDecodeError:
             return []
 
@@ -216,100 +256,67 @@ class DaangnCrawler:
             has_url = any(k in obj for k in ("url", "path", "link"))
             if has_title and has_url:
                 raw_url = str(obj.get("url") or obj.get("path") or obj.get("link") or "").strip()
-                if raw_url:
-                    if raw_url.startswith("/"):
-                        raw_url = f"https://www.daangn.com{raw_url}"
-                    if "/buy-sell/articles/" in raw_url:
-                        title = str(obj.get("title") or obj.get("name") or "(제목 없음)").strip()
-                        price = str(obj.get("priceString") or obj.get("price") or obj.get("priceText") or "가격 정보 없음").strip()
-                        location = str(obj.get("regionName") or obj.get("dong") or obj.get("address") or "지역 정보 없음").strip()
-                        image_url = self._extract_image(obj)
-                        output.append(
-                            Listing(
-                                title=title,
-                                price=price,
-                                location=location,
-                                url=self._normalize_article_url(raw_url),
-                                image_url=image_url,
-                                source="daangn",
-                            )
+                if raw_url.startswith("/"):
+                    raw_url = f"https://www.daangn.com{raw_url}"
+                if "/buy-sell/articles/" in raw_url:
+                    output.append(
+                        Listing(
+                            title=str(obj.get("title") or obj.get("name") or "(제목 없음)").strip(),
+                            price=str(obj.get("priceString") or obj.get("price") or obj.get("priceText") or "가격 정보 없음").strip(),
+                            location=str(obj.get("regionName") or obj.get("dong") or obj.get("address") or "지역 정보 없음").strip(),
+                            url=self._normalize_article_url(raw_url),
+                            image_url=self._extract_image(obj),
+                            source="daangn",
                         )
+                    )
 
-            for value in obj.values():
-                self._collect_listings_from_obj(value, output)
+            for v in obj.values():
+                self._collect_listings_from_obj(v, output)
         elif isinstance(obj, list):
-            for item in obj:
-                self._collect_listings_from_obj(item, output)
+            for x in obj:
+                self._collect_listings_from_obj(x, output)
 
     def _parse_with_regex(self, html: str):
         results = []
-        pattern = re.compile(
-            r'<a[^>]+href="(?P<href>/kr/buy-sell/articles/\d+)"[^>]*>(?P<body>.*?)</a>',
-            re.DOTALL | re.IGNORECASE,
-        )
+        pattern = re.compile(r'<a[^>]+href="(?P<href>/kr/buy-sell/articles/\d+)"[^>]*>(?P<body>.*?)</a>', re.DOTALL | re.IGNORECASE)
         for match in pattern.finditer(html):
-            href = match.group("href")
             body = match.group("body")
-
+            href = match.group("href")
             title_match = re.search(r"<h2[^>]*>(.*?)</h2>", body, re.DOTALL | re.IGNORECASE)
             price_match = re.search(r"<div[^>]*class=\"[^\"]*price[^\"]*\"[^>]*>(.*?)</div>", body, re.DOTALL | re.IGNORECASE)
             location_match = re.search(r"<div[^>]*class=\"[^\"]*region[^\"]*\"[^>]*>(.*?)</div>", body, re.DOTALL | re.IGNORECASE)
-            image_match = re.search(r"<img[^>]+src=\"([^\"]+)\"", body, re.DOTALL | re.IGNORECASE)
+            image_match = re.search(r"<img[^>]+src=\"([^\"]+)\"", body, re.IGNORECASE)
 
-            title = self._strip_html(title_match.group(1)) if title_match else "(제목 없음)"
-            price = self._strip_html(price_match.group(1)) if price_match else "가격 정보 없음"
-            location = self._strip_html(location_match.group(1)) if location_match else "지역 정보 없음"
-            image_url = image_match.group(1).strip() if image_match else ""
-            url = self._normalize_article_url(f"https://www.daangn.com{href}")
-
-            results.append(Listing(title=title, price=price, location=location, url=url, image_url=image_url, source="daangn"))
-
+            results.append(
+                Listing(
+                    title=self._strip_html(title_match.group(1)) if title_match else "(제목 없음)",
+                    price=self._strip_html(price_match.group(1)) if price_match else "가격 정보 없음",
+                    location=self._strip_html(location_match.group(1)) if location_match else "지역 정보 없음",
+                    url=self._normalize_article_url(f"https://www.daangn.com{href}"),
+                    image_url=image_match.group(1).strip() if image_match else "",
+                    source="daangn",
+                )
+            )
         return results
-
-    def _extract_links_from_ddg(self, html: str):
-        links = []
-        for href in re.findall(r'<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"', html, flags=re.IGNORECASE):
-            link = unescape(href)
-            if link.startswith("//"):
-                link = f"https:{link}"
-            if link.startswith("/") and "uddg=" in link:
-                qs = urllib.parse.parse_qs(urllib.parse.urlsplit(link).query)
-                if qs.get("uddg"):
-                    link = urllib.parse.unquote(qs["uddg"][0])
-            links.append(link)
-
-        for href in re.findall(r'href="([^"]*uddg=[^"]+)"', html, flags=re.IGNORECASE):
-            qs = urllib.parse.parse_qs(urllib.parse.urlsplit(unescape(href)).query)
-            if qs.get("uddg"):
-                links.append(urllib.parse.unquote(qs["uddg"][0]))
-
-        return links
 
     def _parse_listing_page(self, url: str, html: str):
         title = self._extract_meta(html, "property", "og:title") or self._extract_title(html) or "(제목 없음)"
-        image_url = self._extract_meta(html, "property", "og:image") or ""
-
+        image_url = self._extract_meta(html, "property", "og:image")
         price = "가격 정보 없음"
         location = "지역 정보 없음"
 
-        json_blocks = re.findall(r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>', html, flags=re.DOTALL | re.IGNORECASE)
-        for block in json_blocks:
+        for block in re.findall(r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>', html, flags=re.DOTALL | re.IGNORECASE):
             try:
                 data = json.loads(block.strip())
             except json.JSONDecodeError:
                 continue
             if isinstance(data, dict):
-                offers = data.get("offers") if isinstance(data.get("offers"), dict) else None
-                if offers and offers.get("price"):
+                offers = data.get("offers") if isinstance(data.get("offers"), dict) else {}
+                if offers.get("price"):
                     price = str(offers.get("price"))
-                area = data.get("areaServed")
-                if isinstance(area, dict) and area.get("name"):
+                area = data.get("areaServed") if isinstance(data.get("areaServed"), dict) else {}
+                if area.get("name"):
                     location = str(area.get("name"))
-
-        if price == "가격 정보 없음":
-            m = re.search(r'([0-9][0-9,]*(?:원|만원)|무료나눔|나눔)', html)
-            if m:
-                price = m.group(1)
 
         return Listing(
             title=self._strip_html(title),
@@ -317,13 +324,12 @@ class DaangnCrawler:
             location=self._strip_html(location),
             url=self._normalize_article_url(url),
             image_url=image_url,
-            source="web-index",
+            source="sitemap",
         )
 
     @staticmethod
     def _extract_meta(html: str, attr: str, attr_value: str) -> str:
-        pattern = rf'<meta[^>]+{attr}="{re.escape(attr_value)}"[^>]+content="([^"]+)"'
-        m = re.search(pattern, html, flags=re.IGNORECASE)
+        m = re.search(rf'<meta[^>]+{attr}="{re.escape(attr_value)}"[^>]+content="([^"]+)"', html, flags=re.IGNORECASE)
         return m.group(1).strip() if m else ""
 
     @staticmethod
@@ -334,10 +340,8 @@ class DaangnCrawler:
     @staticmethod
     def _normalize_article_url(url: str) -> str:
         parsed = urllib.parse.urlsplit(url)
-        path = parsed.path
-        if "/kr/buy-sell/articles/" in path:
-            path = path.split("?")[0]
-            return f"https://www.daangn.com{path}"
+        if "/kr/buy-sell/articles/" in parsed.path:
+            return f"https://www.daangn.com{parsed.path}"
         return url.split("?")[0]
 
     @staticmethod
@@ -347,10 +351,16 @@ class DaangnCrawler:
 
     @staticmethod
     def _extract_image(obj) -> str:
-        for key in ("image", "imageUrl", "thumbnail", "thumbnailUrl", "imageURL", "thumbUrl"):
-            value = obj.get(key) if isinstance(obj, dict) else None
+        if not isinstance(obj, dict):
+            return ""
+        for key in ("image", "imageUrl", "thumbnail", "thumbnailUrl", "imageURL", "thumbUrl", "images"):
+            value = obj.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
+            if isinstance(value, dict):
+                nested = value.get("url") or value.get("src")
+                if isinstance(nested, str) and nested.strip():
+                    return nested.strip()
             if isinstance(value, list):
                 for item in value:
                     if isinstance(item, str) and item.strip():
@@ -359,21 +369,6 @@ class DaangnCrawler:
                         nested = item.get("url") or item.get("src")
                         if isinstance(nested, str) and nested.strip():
                             return nested.strip()
-            if isinstance(value, dict):
-                nested = value.get("url") or value.get("src")
-                if isinstance(nested, str) and nested.strip():
-                    return nested.strip()
-
-        files = obj.get("images") if isinstance(obj, dict) else None
-        if isinstance(files, list):
-            for item in files:
-                if isinstance(item, str) and item.strip():
-                    return item.strip()
-                if isinstance(item, dict):
-                    nested = item.get("url") or item.get("src")
-                    if isinstance(nested, str) and nested.strip():
-                        return nested.strip()
-
         return ""
 
 
@@ -386,7 +381,7 @@ class App:
         self.keyword_var = StringVar()
         self.max_pages_var = StringVar(value="5")
         self.preview_var = StringVar(value="사진 URL: (선택된 항목 없음)")
-        self.include_web_index_var = IntVar(value=1)
+        self.include_sitemap_boost_var = IntVar(value=1)
 
         self.crawler = DaangnCrawler()
         self.queue = queue.Queue()
@@ -401,12 +396,12 @@ class App:
         top.pack(fill="x", padx=12, pady=10)
 
         Label(top, text="키워드").pack(side=LEFT)
-        Entry(top, textvariable=self.keyword_var, width=24).pack(side=LEFT, padx=8)
+        Entry(top, textvariable=self.keyword_var, width=22).pack(side=LEFT, padx=8)
 
         Label(top, text="최대 페이지").pack(side=LEFT)
         Entry(top, textvariable=self.max_pages_var, width=6).pack(side=LEFT, padx=8)
 
-        Checkbutton(top, text="전국 보강(웹 인덱스 포함)", variable=self.include_web_index_var).pack(side=LEFT, padx=(8, 16))
+        Checkbutton(top, text="전국 보강(사이트맵 스캔)", variable=self.include_sitemap_boost_var).pack(side=LEFT, padx=(6, 14))
 
         Button(top, text="검색 시작", command=self.on_search).pack(side=LEFT, padx=4)
         Button(top, text="선택 상품 열기", command=self.on_open_selected).pack(side=LEFT, padx=4)
@@ -421,18 +416,21 @@ class App:
 
         cols = ("title", "price", "location", "source", "url", "image")
         self.tree = ttk.Treeview(table_frame, columns=cols, show="headings")
-        self.tree.heading("title", text="제목")
-        self.tree.heading("price", text="가격")
-        self.tree.heading("location", text="지역")
-        self.tree.heading("source", text="수집경로")
-        self.tree.heading("url", text="URL")
-        self.tree.heading("image", text="사진")
+        for col, text in (
+            ("title", "제목"),
+            ("price", "가격"),
+            ("location", "지역"),
+            ("source", "수집경로"),
+            ("url", "URL"),
+            ("image", "사진"),
+        ):
+            self.tree.heading(col, text=text)
 
-        self.tree.column("title", width=260, anchor=W)
-        self.tree.column("price", width=110, anchor=W)
-        self.tree.column("location", width=150, anchor=W)
-        self.tree.column("source", width=90, anchor=W)
-        self.tree.column("url", width=360, anchor=W)
+        self.tree.column("title", width=250, anchor=W)
+        self.tree.column("price", width=100, anchor=W)
+        self.tree.column("location", width=140, anchor=W)
+        self.tree.column("source", width=80, anchor=W)
+        self.tree.column("url", width=380, anchor=W)
         self.tree.column("image", width=260, anchor=W)
 
         scrollbar = ttk.Scrollbar(table_frame, orient=VERTICAL, command=self.tree.yview)
@@ -458,10 +456,10 @@ class App:
             if max_pages < 1 or max_pages > 50:
                 raise ValueError
         except ValueError:
-            messagebox.showwarning("입력 오류", "최대 페이지는 1~50 사이 숫자여야 합니다.")
+            messagebox.showwarning("입력 오류", "최대 페이지는 1~50 숫자여야 합니다.")
             return
 
-        include_web_index = bool(self.include_web_index_var.get())
+        include_sitemap_boost = bool(self.include_sitemap_boost_var.get())
 
         self.status_label.config(text="검색 중...")
         self.results = []
@@ -469,16 +467,12 @@ class App:
         self.preview_var.set("사진 URL: (선택된 항목 없음)")
         self.tree.delete(*self.tree.get_children())
 
-        thread = threading.Thread(
-            target=self._search_worker,
-            args=(keyword, max_pages, include_web_index),
-            daemon=True,
-        )
-        thread.start()
+        th = threading.Thread(target=self._search_worker, args=(keyword, max_pages, include_sitemap_boost), daemon=True)
+        th.start()
 
-    def _search_worker(self, keyword: str, max_pages: int, include_web_index: bool):
+    def _search_worker(self, keyword: str, max_pages: int, include_sitemap_boost: bool):
         try:
-            results = self.crawler.search(keyword=keyword, max_pages=max_pages, include_web_index=include_web_index)
+            results = self.crawler.search(keyword, max_pages=max_pages, include_sitemap_boost=include_sitemap_boost)
             self.queue.put(("success", results))
         except Exception as exc:  # noqa: BLE001
             self.queue.put(("error", str(exc)))
@@ -491,8 +485,8 @@ class App:
                     self.results = payload
                     self.url_to_listing = {item.url: item for item in payload}
                     for item in payload:
-                        image_cell = item.image_url if item.image_url else "(사진 없음)"
-                        self.tree.insert("", END, values=(item.title, item.price, item.location, item.source, item.url, image_cell))
+                        img = item.image_url if item.image_url else "(사진 없음)"
+                        self.tree.insert("", END, values=(item.title, item.price, item.location, item.source, item.url, img))
                     self.status_label.config(text=f"완료: {len(payload)}건")
                 else:
                     self.status_label.config(text="오류 발생")
@@ -512,34 +506,31 @@ class App:
         return self.url_to_listing.get(values[4])
 
     def on_open_selected(self):
-        listing = self._get_selected_listing()
-        if not listing:
-            messagebox.showinfo("상품 열기", "먼저 목록에서 상품 1개를 선택해주세요.")
+        item = self._get_selected_listing()
+        if not item:
+            messagebox.showinfo("상품 열기", "먼저 목록에서 상품을 선택해주세요.")
             return
-        webbrowser.open(listing.url)
+        webbrowser.open(item.url)
 
     def on_open_selected_image(self):
-        listing = self._get_selected_listing()
-        if not listing:
-            messagebox.showinfo("사진 열기", "먼저 목록에서 상품 1개를 선택해주세요.")
+        item = self._get_selected_listing()
+        if not item:
+            messagebox.showinfo("사진 열기", "먼저 목록에서 상품을 선택해주세요.")
             return
-        if not listing.image_url:
-            messagebox.showinfo("사진 열기", "해당 상품은 사진 URL을 찾지 못했습니다.")
+        if not item.image_url:
+            messagebox.showinfo("사진 열기", "해당 상품은 사진 URL이 없습니다.")
             return
-        webbrowser.open(listing.image_url)
+        webbrowser.open(item.image_url)
 
     def on_row_double_click(self, _event):
         self.on_open_selected()
 
     def on_selection_changed(self, _event):
-        listing = self._get_selected_listing()
-        if not listing:
+        item = self._get_selected_listing()
+        if not item:
             self.preview_var.set("사진 URL: (선택된 항목 없음)")
             return
-        if listing.image_url:
-            self.preview_var.set(f"사진 URL: {listing.image_url}")
-        else:
-            self.preview_var.set("사진 URL: (이 상품은 사진 URL이 없습니다)")
+        self.preview_var.set(f"사진 URL: {item.image_url or '(이 상품은 사진 URL이 없습니다)'}")
 
     def on_export(self):
         if not self.results:
