@@ -42,17 +42,18 @@ class DaangnCrawler:
     def __init__(self, timeout: int = 15):
         self.timeout = timeout
 
-    def search(self, keyword: str, max_pages: int = 3, include_sitemap_boost: bool = True):
+    def search(self, keyword: str, max_pages: int = 3, include_sitemap_boost: bool = True, sitemap_only: bool = False):
         dedupe = set()
         results = []
 
-        for item in self._search_from_daangn(keyword, max_pages):
-            if item.url in dedupe:
-                continue
-            dedupe.add(item.url)
-            results.append(item)
+        if not sitemap_only:
+            for item in self._search_from_daangn(keyword, max_pages):
+                if item.url in dedupe:
+                    continue
+                dedupe.add(item.url)
+                results.append(item)
 
-        if include_sitemap_boost:
+        if include_sitemap_boost or sitemap_only:
             for item in self._search_from_sitemap(keyword, max_pages):
                 if item.url in dedupe:
                     continue
@@ -93,7 +94,7 @@ class DaangnCrawler:
         article_urls = self._collect_article_urls_from_sitemaps(max_pages=max_pages)
 
         # 느리지 않도록 상한
-        scan_limit = min(len(article_urls), max_pages * 120)
+        scan_limit = min(len(article_urls), max_pages * 300)
         for article_url in article_urls[:scan_limit]:
             try:
                 html = self._fetch_url_text(article_url)
@@ -382,6 +383,7 @@ class App:
         self.max_pages_var = StringVar(value="5")
         self.preview_var = StringVar(value="사진 URL: (선택된 항목 없음)")
         self.include_sitemap_boost_var = IntVar(value=1)
+        self.sitemap_only_var = IntVar(value=0)
 
         self.crawler = DaangnCrawler()
         self.queue = queue.Queue()
@@ -401,7 +403,8 @@ class App:
         Label(top, text="최대 페이지").pack(side=LEFT)
         Entry(top, textvariable=self.max_pages_var, width=6).pack(side=LEFT, padx=8)
 
-        Checkbutton(top, text="전국 보강(사이트맵 스캔)", variable=self.include_sitemap_boost_var).pack(side=LEFT, padx=(6, 14))
+        Checkbutton(top, text="전국 보강(사이트맵 스캔)", variable=self.include_sitemap_boost_var).pack(side=LEFT, padx=(6, 8))
+        Checkbutton(top, text="전국만(로컬검색 제외)", variable=self.sitemap_only_var).pack(side=LEFT, padx=(0, 14))
 
         Button(top, text="검색 시작", command=self.on_search).pack(side=LEFT, padx=4)
         Button(top, text="선택 상품 열기", command=self.on_open_selected).pack(side=LEFT, padx=4)
@@ -460,6 +463,7 @@ class App:
             return
 
         include_sitemap_boost = bool(self.include_sitemap_boost_var.get())
+        sitemap_only = bool(self.sitemap_only_var.get())
 
         self.status_label.config(text="검색 중...")
         self.results = []
@@ -467,12 +471,17 @@ class App:
         self.preview_var.set("사진 URL: (선택된 항목 없음)")
         self.tree.delete(*self.tree.get_children())
 
-        th = threading.Thread(target=self._search_worker, args=(keyword, max_pages, include_sitemap_boost), daemon=True)
+        th = threading.Thread(target=self._search_worker, args=(keyword, max_pages, include_sitemap_boost, sitemap_only), daemon=True)
         th.start()
 
-    def _search_worker(self, keyword: str, max_pages: int, include_sitemap_boost: bool):
+    def _search_worker(self, keyword: str, max_pages: int, include_sitemap_boost: bool, sitemap_only: bool):
         try:
-            results = self.crawler.search(keyword, max_pages=max_pages, include_sitemap_boost=include_sitemap_boost)
+            results = self.crawler.search(
+                keyword,
+                max_pages=max_pages,
+                include_sitemap_boost=include_sitemap_boost,
+                sitemap_only=sitemap_only,
+            )
             self.queue.put(("success", results))
         except Exception as exc:  # noqa: BLE001
             self.queue.put(("error", str(exc)))
