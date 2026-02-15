@@ -97,8 +97,9 @@ python build_exe.py
   - 해결 1: GUI에서 `브라우저 설치` 버튼 클릭
   - 해결 2: PowerShell에서 `python -m playwright install chromium`
 - 판매중 매물이 있는데 0건으로 나옴
-  - 최신 버전에서는 수집 셀렉터를 `main a[href*='/articles/']` 기반으로 바꾸고,
-    결과 로딩을 위해 스크롤 fallback을 추가했습니다.
+  - 최신 버전에서는 수집 셀렉터를 `a[href*='/articles/'], a[href*='/kr/buy-sell/']`로 확장하고,
+    텍스트가 비어 있으면 상위 `article` 텍스트로 재파싱합니다.
+  - 검색 후 무한스크롤 로딩(여러 번 스크롤) + JS 전체 링크 fallback 수집까지 수행합니다.
 
 ## 주의사항
 

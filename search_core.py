@@ -14,6 +14,7 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
+from urllib.parse import quote_plus
 
 BASE_URL = "https://www.daangn.com/kr/buy-sell/"
 SKIP_STATUS_KEYWORDS = ("판매완료", "거래완료", "예약중")
@@ -270,12 +271,16 @@ async def search_keyword(page: Any, keyword: str, delay_ms: int) -> None:
         search_input = locator
         break
 
-    if search_input is None:
-        raise RuntimeError("검색 입력창을 찾지 못했습니다.")
+    if search_input is not None:
+        await search_input.fill("")
+        await search_input.fill(keyword)
+        await search_input.press("Enter")
+        await page.wait_for_timeout(delay_ms)
+        return
 
-    await search_input.fill("")
-    await search_input.fill(keyword)
-    await search_input.press("Enter")
+    # 입력창 탐색 실패 시 URL 파라미터 검색 fallback
+    encoded = quote_plus(keyword)
+    await page.goto(f"{BASE_URL}?search={encoded}", wait_until="domcontentloaded")
     await page.wait_for_timeout(delay_ms)
 
 
@@ -284,40 +289,66 @@ def is_selling(text: str) -> bool:
 
 
 async def collect_items(page: Any, region: str) -> list[Item]:
-    # 검색 결과는 a[href*="/articles/"] 형태가 비교적 안정적
-    anchors = page.locator("main a[href*='/articles/']")
-    count = await anchors.count()
-
     items: list[Item] = []
     seen_links_local: set[str] = set()
 
-    for i in range(count):
-        anchor = anchors.nth(i)
+    # 1) 우선 CSS locator 기반 수집
+    anchors = page.locator("a[href*='/articles/'], a[href*='/kr/buy-sell/']")
+    count = await anchors.count()
 
-        href = await anchor.get_attribute("href")
-        if not href:
-            continue
-        link = f"https://www.daangn.com{href}" if href.startswith("/") else href
+    async def add_item_from_anchor(anchor: Any, href: str | None = None) -> None:
+        nonlocal items
+        raw_href = href or await anchor.get_attribute("href")
+        if not raw_href:
+            return
+        if "/articles/" not in raw_href and "/kr/buy-sell/" not in raw_href:
+            return
+        if "/kr/buy-sell/" in raw_href and raw_href.rstrip('/').endswith('/kr/buy-sell'):
+            return
+
+        link = f"https://www.daangn.com{raw_href}" if raw_href.startswith("/") else raw_href
         if link in seen_links_local:
-            continue
+            return
         seen_links_local.add(link)
 
         full_text = (await anchor.inner_text()).strip()
         if not full_text:
-            continue
+            # 앵커 안쪽 텍스트가 없으면 가까운 article 텍스트 사용
+            article = anchor.locator("xpath=ancestor::article[1]").first
+            if await article.count() > 0:
+                full_text = (await article.inner_text()).strip()
 
-        # 판매완료/거래완료/예약중 명시 텍스트만 제외
+        if not full_text:
+            return
         if not is_selling(full_text):
-            continue
+            return
 
-        title = re.split(r"\n+", full_text)[0].strip()
-        if not title:
-            title = "(제목 없음)"
-
+        title = re.split(r"\n+", full_text)[0].strip() or "(제목 없음)"
         price_match = re.search(r"([\d,]+\s*원|나눔|무료)", full_text)
         price = price_match.group(1) if price_match else "가격 정보 없음"
-
         items.append(Item(region=region, title=title, price=price, link=link))
+
+    for i in range(count):
+        await add_item_from_anchor(anchors.nth(i))
+
+    if items:
+        return items
+
+    # 2) locator로 0건이면 JS로 페이지 전체 링크 fallback 수집
+    fallback_links: list[str] = await page.evaluate(
+        """
+        () => Array.from(document.querySelectorAll('a[href]'))
+          .map(a => a.getAttribute('href'))
+          .filter(Boolean)
+        """
+    )
+
+    for href in fallback_links:
+        if '/articles/' not in href and '/kr/buy-sell/' not in href:
+            continue
+        # href 매칭 앵커 중 첫 번째 텍스트 활용
+        anchor = page.locator(f"a[href='{href}']").first
+        await add_item_from_anchor(anchor, href=href)
 
     return items
 
@@ -358,9 +389,10 @@ async def run_search(
                 await page.wait_for_timeout(delay_ms)
                 await change_region(page, region, delay_ms)
                 await search_keyword(page, keyword, delay_ms)
-                # 검색 결과 추가 로딩 유도
-                await page.mouse.wheel(0, 1800)
-                await page.wait_for_timeout(700)
+                # 검색 결과 추가 로딩 유도 (무한스크롤 대응)
+                for _ in range(3):
+                    await page.mouse.wheel(0, 2200)
+                    await page.wait_for_timeout(500)
                 items = await collect_items(page, region)
                 add_count = 0
                 for item in items:
