@@ -148,7 +148,26 @@ async def safe_click(page: Any, selectors: Iterable[str], timeout_ms: int = 4_00
     return False
 
 
-async def change_region(page: Any, region: str, delay_ms: int) -> None:
+
+
+async def read_current_region_label(page: Any) -> str:
+    """헤더/상단에서 현재 선택된 지역 텍스트를 최대한 읽어냅니다."""
+    selectors = (
+        "header button:has-text('동네')",
+        "header [aria-label*='동네']",
+        "header [aria-label*='지역']",
+        "header button",
+        "header a",
+    )
+    for selector in selectors:
+        locator = page.locator(selector).first
+        if await locator.count() == 0:
+            continue
+        text = (await locator.inner_text()).strip()
+        if text:
+            return text
+    return ""
+async def change_region(page: Any, region: str, delay_ms: int) -> str:
     opened = await safe_click(
         page,
         selectors=(
@@ -186,7 +205,6 @@ async def change_region(page: Any, region: str, delay_ms: int) -> None:
     if tokens:
         candidates.append(tokens[-1])
 
-    # 중복 제거
     seen: set[str] = set()
     query_candidates = [c for c in candidates if not (c in seen or seen.add(c))]
 
@@ -195,65 +213,66 @@ async def change_region(page: Any, region: str, delay_ms: int) -> None:
         await text_input.fill(query)
         await page.wait_for_timeout(max(delay_ms, 900))
 
-        # 1) 원본 지역명 정확 매칭
-        clicked_region = await safe_click(
+        clicked = await safe_click(
             page,
             selectors=(
                 f"[role='option']:has-text('{region}')",
                 f"li:has-text('{region}')",
                 f"button:has-text('{region}')",
                 f"a:has-text('{region}')",
-            ),
-            timeout_ms=1_800,
-        )
-        if clicked_region:
-            await page.wait_for_timeout(delay_ms)
-            return
-
-        # 2) 현재 검색어로 매칭
-        clicked_query = await safe_click(
-            page,
-            selectors=(
                 f"[role='option']:has-text('{query}')",
                 f"li:has-text('{query}')",
                 f"button:has-text('{query}')",
                 f"a:has-text('{query}')",
+                "[role='dialog'] [role='option']",
+                "[role='listbox'] [role='option']",
+                "[role='dialog'] li",
+                "[aria-modal='true'] li",
             ),
-            timeout_ms=1_800,
+            timeout_ms=2_000,
         )
-        if clicked_query:
-            await page.wait_for_timeout(delay_ms)
-            return
-
-        # 3) 검색 결과의 첫 번째 후보 선택
-        first_option = None
-        for selector in (
-            "[role='dialog'] [role='option']",
-            "[role='listbox'] [role='option']",
-            "[role='dialog'] li",
-            "[aria-modal='true'] li",
-        ):
-            locator = page.locator(selector).first
-            if await locator.count() > 0:
-                first_option = locator
-                break
-
-        if first_option is not None:
+        if not clicked:
             try:
-                await first_option.click(timeout=1_800)
-                await page.wait_for_timeout(delay_ms)
-                return
+                await text_input.press("ArrowDown")
+                await text_input.press("Enter")
+                clicked = True
             except Exception:
-                pass
+                clicked = False
 
-        # 4) 키보드 선택 fallback
-        try:
-            await text_input.press("ArrowDown")
-            await text_input.press("Enter")
-            await page.wait_for_timeout(delay_ms)
-            return
-        except Exception:
+        if not clicked:
             continue
+
+        # 적용/확인 버튼이 있는 UI 대응
+        await safe_click(
+            page,
+            selectors=(
+                "button:has-text('적용')",
+                "button:has-text('완료')",
+                "button:has-text('확인')",
+                "button:has-text('선택')",
+            ),
+            timeout_ms=1_200,
+        )
+        await page.wait_for_timeout(delay_ms)
+
+        current = await read_current_region_label(page)
+        if any(token in current for token in (region, query, tokens[-1] if tokens else query)):
+            return current
+
+        # 모달 닫기 후 다시 확인
+        await safe_click(
+            page,
+            selectors=(
+                "button[aria-label*='닫기']",
+                "button:has-text('닫기')",
+                "button:has-text('취소')",
+            ),
+            timeout_ms=800,
+        )
+        await page.wait_for_timeout(500)
+        current = await read_current_region_label(page)
+        if any(token in current for token in (region, query, tokens[-1] if tokens else query)):
+            return current
 
     raise RuntimeError(f"지역 '{region}' 선택 실패")
 
@@ -378,18 +397,20 @@ async def run_search(
                     "GUI에서 '브라우저 설치' 버튼을 눌러 설치하거나, `python -m playwright install chromium`를 실행해 주세요."
                 ) from exc
             raise
-        context = await browser.new_context(locale="ko-KR")
-        page = await context.new_page()
 
         for idx, region in enumerate(regions, start=1):
             if progress_callback:
                 progress_callback(f"[{idx}/{len(regions)}] {region} 검색 중...")
+            context = await browser.new_context(locale="ko-KR")
+            page = await context.new_page()
             try:
                 await page.goto(BASE_URL, wait_until="domcontentloaded")
                 await page.wait_for_timeout(delay_ms)
-                await change_region(page, region, delay_ms)
+                selected_label = await change_region(page, region, delay_ms)
+                if progress_callback:
+                    progress_callback(f"[{idx}/{len(regions)}] 지역 적용 확인: {selected_label}")
+
                 await search_keyword(page, keyword, delay_ms)
-                # 검색 결과 추가 로딩 유도 (무한스크롤 대응)
                 for _ in range(3):
                     await page.mouse.wheel(0, 2200)
                     await page.wait_for_timeout(500)
@@ -406,8 +427,9 @@ async def run_search(
             except Exception as exc:
                 if progress_callback:
                     progress_callback(f"[{idx}/{len(regions)}] {region}: 실패 ({exc})")
+            finally:
+                await context.close()
 
-        await context.close()
         await browser.close()
 
     return all_items

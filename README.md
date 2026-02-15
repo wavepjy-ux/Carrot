@@ -96,6 +96,9 @@ python build_exe.py
   - 원인: Playwright Chromium 브라우저가 설치되지 않았거나 경로가 꼬인 상태
   - 해결 1: GUI에서 `브라우저 설치` 버튼 클릭
   - 해결 2: PowerShell에서 `python -m playwright install chromium`
+- 지역이 실제로 바뀌지 않는 것 같음
+  - 최신 버전은 지역 선택 후 헤더 라벨을 읽어 적용 여부를 확인하고 로그에 `지역 적용 확인: ...`을 출력합니다.
+  - 또한 지역마다 새 브라우저 컨텍스트를 열어 이전 지역 상태가 다음 검색에 섞이지 않게 처리합니다.
 - 판매중 매물이 있는데 0건으로 나옴
   - 최신 버전에서는 수집 셀렉터를 `a[href*='/articles/'], a[href*='/kr/buy-sell/']`로 확장하고,
     텍스트가 비어 있으면 상위 `article` 텍스트로 재파싱합니다.
