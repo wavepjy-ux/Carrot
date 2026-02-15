@@ -21,7 +21,7 @@ def main() -> int:
 
     if importlib.util.find_spec("PyInstaller") is None:
         print("[오류] PyInstaller가 설치되어 있지 않습니다.")
-        print("       먼저 `pip install -r requirements.txt`를 실행해 주세요.")
+        print("       먼저 `python -m pip install -r requirements.txt`를 실행해 주세요.")
         return 1
 
     script_path = ROOT / SCRIPT_NAME
