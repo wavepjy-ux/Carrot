@@ -42,12 +42,12 @@ class DaangnCrawler:
     def __init__(self, timeout: int = 15):
         self.timeout = timeout
 
-    def search(self, keyword: str, max_pages: int = 3, include_sitemap_boost: bool = True, sitemap_only: bool = False):
+    def search(self, keyword: str, max_pages: int = 3, include_sitemap_boost: bool = True, sitemap_only: bool = False, region_expand: bool = True):
         dedupe = set()
         results = []
 
         if not sitemap_only:
-            for item in self._search_from_daangn(keyword, max_pages):
+            for item in self._search_from_daangn(keyword, max_pages, region_expand=region_expand):
                 if item.url in dedupe:
                     continue
                 dedupe.add(item.url)
@@ -62,31 +62,48 @@ class DaangnCrawler:
 
         return results
 
-    def _search_from_daangn(self, keyword: str, max_pages: int):
+    def _search_from_daangn(self, keyword: str, max_pages: int, region_expand: bool = True):
         results = []
         seen = set()
 
-        for page in range(1, max_pages + 1):
-            html = self._fetch_search_page(keyword, page)
-            parsed = self._parse_from_json_ld(html)
-            if not parsed:
-                parsed = self._parse_from_next_data(html)
-            if not parsed:
-                parsed = self._parse_with_regex(html)
-            if not parsed:
-                break
+        queries = self._build_region_queries(keyword) if region_expand else [keyword]
+        max_queries = min(len(queries), 12)
+        per_query_pages = max(1, max_pages // max_queries)
 
-            new_count = 0
-            for item in parsed:
-                if item.url in seen:
-                    continue
-                seen.add(item.url)
-                results.append(item)
-                new_count += 1
-            if new_count == 0:
-                break
+        for q in queries[:max_queries]:
+            for page in range(1, per_query_pages + 1):
+                html = self._fetch_search_page(q, page)
+                parsed = self._parse_from_json_ld(html)
+                if not parsed:
+                    parsed = self._parse_from_next_data(html)
+                if not parsed:
+                    parsed = self._parse_with_regex(html)
+                if not parsed:
+                    break
+
+                new_count = 0
+                for item in parsed:
+                    if item.url in seen:
+                        continue
+                    seen.add(item.url)
+                    results.append(item)
+                    new_count += 1
+                if new_count == 0:
+                    break
 
         return results
+
+    @staticmethod
+    def _build_region_queries(keyword: str):
+        keyword = keyword.strip()
+        regions = [
+            "서울", "부산", "대구", "인천", "광주", "대전", "울산", "세종",
+            "경기", "강원", "충북", "충남", "전북", "전남", "경북", "경남", "제주",
+        ]
+        queries = [keyword]
+        for r in regions:
+            queries.append(f"{r} {keyword}")
+        return queries
 
     def _search_from_sitemap(self, keyword: str, max_pages: int):
         keyword_norm = keyword.lower().strip()
@@ -384,6 +401,7 @@ class App:
         self.preview_var = StringVar(value="사진 URL: (선택된 항목 없음)")
         self.include_sitemap_boost_var = IntVar(value=1)
         self.sitemap_only_var = IntVar(value=0)
+        self.region_expand_var = IntVar(value=1)
 
         self.crawler = DaangnCrawler()
         self.queue = queue.Queue()
@@ -404,7 +422,8 @@ class App:
         Entry(top, textvariable=self.max_pages_var, width=6).pack(side=LEFT, padx=8)
 
         Checkbutton(top, text="전국 보강(사이트맵 스캔)", variable=self.include_sitemap_boost_var).pack(side=LEFT, padx=(6, 8))
-        Checkbutton(top, text="전국만(로컬검색 제외)", variable=self.sitemap_only_var).pack(side=LEFT, padx=(0, 14))
+        Checkbutton(top, text="전국만(로컬검색 제외)", variable=self.sitemap_only_var).pack(side=LEFT, padx=(0, 8))
+        Checkbutton(top, text="시/도 확장 검색", variable=self.region_expand_var).pack(side=LEFT, padx=(0, 14))
 
         Button(top, text="검색 시작", command=self.on_search).pack(side=LEFT, padx=4)
         Button(top, text="선택 상품 열기", command=self.on_open_selected).pack(side=LEFT, padx=4)
@@ -464,6 +483,7 @@ class App:
 
         include_sitemap_boost = bool(self.include_sitemap_boost_var.get())
         sitemap_only = bool(self.sitemap_only_var.get())
+        region_expand = bool(self.region_expand_var.get())
 
         self.status_label.config(text="검색 중...")
         self.results = []
@@ -471,16 +491,17 @@ class App:
         self.preview_var.set("사진 URL: (선택된 항목 없음)")
         self.tree.delete(*self.tree.get_children())
 
-        th = threading.Thread(target=self._search_worker, args=(keyword, max_pages, include_sitemap_boost, sitemap_only), daemon=True)
+        th = threading.Thread(target=self._search_worker, args=(keyword, max_pages, include_sitemap_boost, sitemap_only, region_expand), daemon=True)
         th.start()
 
-    def _search_worker(self, keyword: str, max_pages: int, include_sitemap_boost: bool, sitemap_only: bool):
+    def _search_worker(self, keyword: str, max_pages: int, include_sitemap_boost: bool, sitemap_only: bool, region_expand: bool):
         try:
             results = self.crawler.search(
                 keyword,
                 max_pages=max_pages,
                 include_sitemap_boost=include_sitemap_boost,
                 sitemap_only=sitemap_only,
+                region_expand=region_expand,
             )
             self.queue.put(("success", results))
         except Exception as exc:  # noqa: BLE001
