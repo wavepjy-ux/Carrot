@@ -12,11 +12,10 @@ import asyncio
 import csv
 import json
 import re
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Iterable
-
-from playwright.async_api import Browser, BrowserContext, Error, Page, async_playwright
+from typing import Any, Iterable
 
 BASE_URL = "https://www.daangn.com/kr/buy-sell/"
 SKIP_STATUS_KEYWORDS = ("판매완료", "거래완료", "예약중", "예약", "완료")
@@ -64,8 +63,29 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+
+def resolve_default_regions_path(path: str) -> Path:
+    candidate = Path(path)
+    if candidate.exists():
+        return candidate
+
+    # EXE 실행 시: exe 폴더 > PyInstaller 임시폴더 순서로 탐색
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        exe_candidate = exe_dir / path
+        if exe_candidate.exists():
+            return exe_candidate
+
+        meipass = Path(getattr(sys, "_MEIPASS", ""))
+        meipass_candidate = meipass / path
+        if meipass_candidate.exists():
+            return meipass_candidate
+
+    return candidate
+
+
 def load_regions(path: str) -> list[str]:
-    file_path = Path(path)
+    file_path = resolve_default_regions_path(path)
     if not file_path.exists():
         raise FileNotFoundError(
             f"지역 파일을 찾을 수 없습니다: {file_path}. regions.txt를 생성해 주세요."
@@ -82,7 +102,7 @@ def load_regions(path: str) -> list[str]:
     return regions
 
 
-async def safe_click(page: Page, selectors: Iterable[str], timeout_ms: int = 4_000) -> bool:
+async def safe_click(page: Any, selectors: Iterable[str], timeout_ms: int = 4_000) -> bool:
     for selector in selectors:
         locator = page.locator(selector).first
         if await locator.count() == 0:
@@ -90,12 +110,12 @@ async def safe_click(page: Page, selectors: Iterable[str], timeout_ms: int = 4_0
         try:
             await locator.click(timeout=timeout_ms)
             return True
-        except Error:
+        except Exception:
             continue
     return False
 
 
-async def change_region(page: Page, region: str, delay_ms: int) -> None:
+async def change_region(page: Any, region: str, delay_ms: int) -> None:
     # 헤더의 지역 변경 버튼 클릭
     opened = await safe_click(
         page,
@@ -148,7 +168,7 @@ async def change_region(page: Page, region: str, delay_ms: int) -> None:
     await page.wait_for_timeout(delay_ms)
 
 
-async def search_keyword(page: Page, keyword: str, delay_ms: int) -> None:
+async def search_keyword(page: Any, keyword: str, delay_ms: int) -> None:
     search_input = None
     for selector in (
         "input[placeholder*='검색']",
@@ -174,7 +194,7 @@ def is_selling(text: str) -> bool:
     return not any(token in text for token in SKIP_STATUS_KEYWORDS)
 
 
-async def collect_items(page: Page, region: str) -> list[Item]:
+async def collect_items(page: Any, region: str) -> list[Item]:
     # 검색 카드 후보 셀렉터들 (페이지 변경에 대비)
     card_selectors = (
         "article",
@@ -216,6 +236,8 @@ async def collect_items(page: Page, region: str) -> list[Item]:
 
 
 async def run(keyword: str, regions: list[str], headful: bool, delay_ms: int) -> list[Item]:
+    from playwright.async_api import async_playwright
+
     all_items: list[Item] = []
     seen_links: set[str] = set()
 

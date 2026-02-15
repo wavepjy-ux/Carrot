@@ -55,3 +55,36 @@ python nationwide_search.py "자전거" --csv results.csv --headful --delay-ms 1
 - 사이트 UI/DOM 구조가 바뀌면 선택자 수정이 필요할 수 있습니다.
 - 너무 빠르게 요청하면 차단될 수 있으므로 `--delay-ms`를 충분히 늘리세요.
 - 서비스 이용약관/robots 정책을 준수해서 사용하세요.
+
+## EXE 빌드 (Windows)
+
+### 1) 빌드 환경 준비
+
+```bash
+pip install -r requirements.txt
+python -m playwright install chromium
+```
+
+### 2) EXE 생성
+
+```bash
+python build_exe.py
+```
+
+또는 Windows에서:
+
+```bat
+build_exe.bat
+```
+
+생성 결과:
+
+- `dist/nationwide_search.exe`
+
+### 3) EXE 실행
+
+```bat
+dist\nationwide_search.exe "아이폰" --csv results.csv --delay-ms 1800
+```
+
+`regions.txt`는 EXE와 같은 폴더에 두고 수정하면 지역 목록을 쉽게 변경할 수 있습니다.
