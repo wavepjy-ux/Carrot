@@ -1,0 +1,264 @@
+import csv
+import json
+import queue
+import re
+import threading
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass
+from datetime import datetime
+from html import unescape
+from tkinter import BOTH, END, LEFT, RIGHT, VERTICAL, W, Button, Entry, Frame, Label, StringVar, Tk, ttk, messagebox
+
+
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/126.0.0.0 Safari/537.36"
+)
+BASE_URL = "https://www.daangn.com/kr/buy-sell/"
+
+
+@dataclass
+class Listing:
+    title: str
+    price: str
+    location: str
+    url: str
+
+
+class DaangnCrawler:
+    def __init__(self, timeout: int = 15):
+        self.timeout = timeout
+
+    def search(self, keyword: str, max_pages: int = 3):
+        dedupe = set()
+        results = []
+        for page in range(1, max_pages + 1):
+            html = self._fetch_page(keyword, page)
+            parsed = self._parse_from_json_ld(html)
+            if not parsed:
+                parsed = self._parse_with_regex(html)
+
+            if not parsed:
+                break
+
+            new_items = 0
+            for item in parsed:
+                if item.url in dedupe:
+                    continue
+                dedupe.add(item.url)
+                results.append(item)
+                new_items += 1
+
+            if new_items == 0:
+                break
+
+        return results
+
+    def _fetch_page(self, keyword: str, page: int) -> str:
+        query = urllib.parse.urlencode({"in": "all", "search": keyword, "page": page})
+        url = f"{BASE_URL}?{query}"
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=self.timeout) as response:
+            return response.read().decode("utf-8", errors="ignore")
+
+    def _parse_from_json_ld(self, html: str):
+        results = []
+        blocks = re.findall(
+            r'<script[^>]+type="application/ld\\+json"[^>]*>(.*?)</script>',
+            html,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        for block in blocks:
+            cleaned = block.strip()
+            if not cleaned:
+                continue
+            try:
+                data = json.loads(cleaned)
+            except json.JSONDecodeError:
+                continue
+
+            items = []
+            if isinstance(data, dict) and "itemListElement" in data:
+                items = data.get("itemListElement", [])
+            elif isinstance(data, list):
+                for entry in data:
+                    if isinstance(entry, dict) and "itemListElement" in entry:
+                        items.extend(entry.get("itemListElement", []))
+
+            for raw in items:
+                item = raw.get("item") if isinstance(raw, dict) else None
+                if not isinstance(item, dict):
+                    continue
+
+                title = str(item.get("name", "")).strip() or "(제목 없음)"
+                url = str(item.get("url", "")).strip()
+                if url.startswith("/"):
+                    url = f"https://www.daangn.com{url}"
+                if not url:
+                    continue
+
+                offers = item.get("offers") if isinstance(item.get("offers"), dict) else {}
+                price = str(offers.get("price", "가격 정보 없음")).strip()
+
+                location = "지역 정보 없음"
+                area = item.get("areaServed")
+                if isinstance(area, dict):
+                    location = str(area.get("name", location)).strip() or location
+
+                results.append(Listing(title=title, price=price, location=location, url=url))
+
+        return results
+
+    def _parse_with_regex(self, html: str):
+        results = []
+        pattern = re.compile(
+            r'<a[^>]+href="(?P<href>/kr/buy-sell/articles/\\d+)"[^>]*>(?P<body>.*?)</a>',
+            re.DOTALL | re.IGNORECASE,
+        )
+        for match in pattern.finditer(html):
+            href = match.group("href")
+            body = match.group("body")
+
+            title_match = re.search(r"<h2[^>]*>(.*?)</h2>", body, re.DOTALL | re.IGNORECASE)
+            price_match = re.search(r"<div[^>]*class=\"[^\"]*price[^\"]*\"[^>]*>(.*?)</div>", body, re.DOTALL | re.IGNORECASE)
+            location_match = re.search(r"<div[^>]*class=\"[^\"]*region[^\"]*\"[^>]*>(.*?)</div>", body, re.DOTALL | re.IGNORECASE)
+
+            title = self._strip_html(title_match.group(1)) if title_match else "(제목 없음)"
+            price = self._strip_html(price_match.group(1)) if price_match else "가격 정보 없음"
+            location = self._strip_html(location_match.group(1)) if location_match else "지역 정보 없음"
+
+            url = f"https://www.daangn.com{href}"
+            results.append(Listing(title=title, price=price, location=location, url=url))
+
+        return results
+
+    @staticmethod
+    def _strip_html(text: str) -> str:
+        text = re.sub(r"<[^>]+>", " ", text)
+        return unescape(re.sub(r"\\s+", " ", text)).strip()
+
+
+class App:
+    def __init__(self):
+        self.root = Tk()
+        self.root.title("당근 전국 통합 검색기 (비공식)")
+        self.root.geometry("1024x640")
+
+        self.keyword_var = StringVar()
+        self.max_pages_var = StringVar(value="5")
+
+        self.crawler = DaangnCrawler()
+        self.queue = queue.Queue()
+        self.results = []
+
+        self._build_ui()
+        self.root.after(200, self._poll_queue)
+
+    def _build_ui(self):
+        top = Frame(self.root)
+        top.pack(fill="x", padx=12, pady=10)
+
+        Label(top, text="키워드").pack(side=LEFT)
+        Entry(top, textvariable=self.keyword_var, width=28).pack(side=LEFT, padx=8)
+
+        Label(top, text="최대 페이지").pack(side=LEFT)
+        Entry(top, textvariable=self.max_pages_var, width=6).pack(side=LEFT, padx=8)
+
+        Button(top, text="검색 시작", command=self.on_search).pack(side=LEFT, padx=4)
+        Button(top, text="CSV 저장", command=self.on_export).pack(side=LEFT, padx=4)
+
+        self.status_label = Label(top, text="대기 중", anchor=W)
+        self.status_label.pack(side=RIGHT)
+
+        table_frame = Frame(self.root)
+        table_frame.pack(fill=BOTH, expand=True, padx=12, pady=(0, 12))
+
+        cols = ("title", "price", "location", "url")
+        self.tree = ttk.Treeview(table_frame, columns=cols, show="headings")
+        self.tree.heading("title", text="제목")
+        self.tree.heading("price", text="가격")
+        self.tree.heading("location", text="지역")
+        self.tree.heading("url", text="URL")
+
+        self.tree.column("title", width=300, anchor=W)
+        self.tree.column("price", width=120, anchor=W)
+        self.tree.column("location", width=180, anchor=W)
+        self.tree.column("url", width=360, anchor=W)
+
+        scrollbar = ttk.Scrollbar(table_frame, orient=VERTICAL, command=self.tree.yview)
+        self.tree.configure(yscroll=scrollbar.set)
+        self.tree.pack(side=LEFT, fill=BOTH, expand=True)
+        scrollbar.pack(side=RIGHT, fill="y")
+
+    def on_search(self):
+        keyword = self.keyword_var.get().strip()
+        if not keyword:
+            messagebox.showwarning("입력 필요", "검색할 키워드를 입력해주세요.")
+            return
+
+        try:
+            max_pages = int(self.max_pages_var.get())
+            if max_pages < 1 or max_pages > 50:
+                raise ValueError
+        except ValueError:
+            messagebox.showwarning("입력 오류", "최대 페이지는 1~50 사이 숫자여야 합니다.")
+            return
+
+        self.status_label.config(text="검색 중...")
+        self.results = []
+        self.tree.delete(*self.tree.get_children())
+
+        thread = threading.Thread(
+            target=self._search_worker,
+            args=(keyword, max_pages),
+            daemon=True,
+        )
+        thread.start()
+
+    def _search_worker(self, keyword: str, max_pages: int):
+        try:
+            results = self.crawler.search(keyword=keyword, max_pages=max_pages)
+            self.queue.put(("success", results))
+        except Exception as exc:  # noqa: BLE001
+            self.queue.put(("error", str(exc)))
+
+    def _poll_queue(self):
+        try:
+            while True:
+                status, payload = self.queue.get_nowait()
+                if status == "success":
+                    self.results = payload
+                    for item in payload:
+                        self.tree.insert("", END, values=(item.title, item.price, item.location, item.url))
+                    self.status_label.config(text=f"완료: {len(payload)}건")
+                else:
+                    self.status_label.config(text="오류 발생")
+                    messagebox.showerror("검색 실패", payload)
+        except queue.Empty:
+            pass
+        finally:
+            self.root.after(200, self._poll_queue)
+
+    def on_export(self):
+        if not self.results:
+            messagebox.showinfo("내보내기", "먼저 검색을 실행해주세요.")
+            return
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"daangn_search_{ts}.csv"
+        with open(filename, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f)
+            writer.writerow(["title", "price", "location", "url"])
+            for row in self.results:
+                writer.writerow([row.title, row.price, row.location, row.url])
+
+        messagebox.showinfo("저장 완료", f"{filename} 파일로 저장했습니다.")
+
+    def run(self):
+        self.root.mainloop()
+
+
+if __name__ == "__main__":
+    App().run()
