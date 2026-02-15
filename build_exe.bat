@@ -7,5 +7,5 @@ if %ERRORLEVEL% NEQ 0 (
   exit /b %ERRORLEVEL%
 )
 
-echo EXE 빌드 성공: dist\nationwide_search.exe
+echo EXE 빌드 성공: dist\daangn_nationwide_search.exe
 endlocal

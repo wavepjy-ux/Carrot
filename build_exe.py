@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PyInstaller로 nationwide_search.exe를 생성합니다."""
+"""PyInstaller로 GUI EXE를 생성합니다."""
 
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-SCRIPT_NAME = "nationwide_search.py"
-OUTPUT_NAME = "nationwide_search"
+SCRIPT_NAME = "nationwide_search_gui.py"
+OUTPUT_NAME = "daangn_nationwide_search"
 
 
 def main() -> int:
@@ -36,6 +36,7 @@ def main() -> int:
         "--noconfirm",
         "--clean",
         "--onefile",
+        "--windowed",
         "--name",
         OUTPUT_NAME,
         "--add-data",
@@ -50,7 +51,7 @@ def main() -> int:
         print(f"[오류] EXE 빌드 실패 (exit code: {exc.returncode})")
         return exc.returncode
 
-    print("\n완료: dist/nationwide_search.exe")
+    print(f"\n완료: dist/{OUTPUT_NAME}.exe")
     return 0
 
 
