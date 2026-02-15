@@ -6,7 +6,9 @@ from __future__ import annotations
 import asyncio
 import csv
 import json
+import os
 import re
+import subprocess
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -22,6 +24,24 @@ class Item:
     title: str
     price: str
     link: str
+
+
+def get_playwright_browser_path() -> Path:
+    """브라우저 바이너리 저장 폴더를 고정해 EXE 임시폴더 이슈를 피합니다."""
+    return Path.home() / ".daangn_playwright_browsers"
+
+
+def install_chromium(progress_callback: Callable[[str], None] | None = None) -> None:
+    """Playwright Chromium 브라우저 설치."""
+    env = os.environ.copy()
+    env["PLAYWRIGHT_BROWSERS_PATH"] = str(get_playwright_browser_path())
+
+    cmd = [sys.executable, "-m", "playwright", "install", "chromium"]
+    if progress_callback:
+        progress_callback("Playwright Chromium 설치를 시작합니다...")
+    subprocess.run(cmd, check=True, env=env)
+    if progress_callback:
+        progress_callback("Playwright Chromium 설치 완료")
 
 
 def resolve_default_regions_path(path: str) -> Path:
@@ -195,11 +215,22 @@ async def run_search(
 ) -> list[Item]:
     from playwright.async_api import async_playwright
 
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(get_playwright_browser_path())
+
     all_items: list[Item] = []
     seen_links: set[str] = set()
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=headless)
+        try:
+            browser = await p.chromium.launch(headless=headless)
+        except Exception as exc:
+            message = str(exc)
+            if "Executable doesn't exist" in message or "Please run the following command" in message:
+                raise RuntimeError(
+                    "Playwright Chromium 브라우저가 설치되지 않았습니다. "
+                    "GUI에서 '브라우저 설치' 버튼을 먼저 눌러 설치해 주세요."
+                ) from exc
+            raise
         context = await browser.new_context(locale="ko-KR")
         page = await context.new_page()
 

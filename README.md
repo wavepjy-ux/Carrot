@@ -38,7 +38,6 @@ python -m venv .venv
 python -m ensurepip --upgrade
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
-python -m playwright install chromium
 ```
 
 ### 4) EXE 빌드
@@ -60,8 +59,9 @@ python build_exe.py
 실행 후 UI에서:
 1. 키워드 입력
 2. 지역 파일(`regions.txt`) 선택/확인
-3. `전국 검색 시작` 클릭
-4. 결과 목록에서 상품 더블클릭하여 링크 열기
+3. (최초 1회) `브라우저 설치` 버튼 클릭
+4. `전국 검색 시작` 클릭
+5. 결과 목록에서 상품 더블클릭하여 링크 열기
 
 ## 지역 파일
 
@@ -78,6 +78,10 @@ python build_exe.py
 - `pip ... 인식되지 않음` → `python -m pip ...` 사용
 - `No module named playwright` → `python -m pip install -r requirements.txt` 먼저 실행
 - `PyInstaller가 설치되어 있지 않습니다` → 위와 동일하게 requirements 설치
+- `BrowserType.launch: Executable doesn't exist ...`
+  - 원인: Playwright Chromium 브라우저가 설치되지 않았거나 경로가 꼬인 상태
+  - 해결 1: GUI에서 `브라우저 설치` 버튼 클릭
+  - 해결 2: PowerShell에서 `python -m playwright install chromium`
 
 ## 주의사항
 

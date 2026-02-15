@@ -9,7 +9,14 @@ import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from search_core import Item, load_regions, run_search_sync, save_csv, save_json
+from search_core import (
+    Item,
+    install_chromium,
+    load_regions,
+    run_search_sync,
+    save_csv,
+    save_json,
+)
 
 
 class App:
@@ -46,8 +53,14 @@ class App:
             row=1, column=3, sticky="w", pady=(8, 0)
         )
 
-        self.search_btn = ttk.Button(top, text="전국 검색 시작", command=self.start_search)
-        self.search_btn.grid(row=1, column=4, padx=4, pady=(8, 0))
+        button_wrap = ttk.Frame(top)
+        button_wrap.grid(row=1, column=4, padx=4, pady=(8, 0), sticky="e")
+
+        self.install_btn = ttk.Button(button_wrap, text="브라우저 설치", command=self.install_browser)
+        self.install_btn.pack(side="left", padx=(0, 4))
+
+        self.search_btn = ttk.Button(button_wrap, text="전국 검색 시작", command=self.start_search)
+        self.search_btn.pack(side="left")
 
         for c in (1, 3):
             top.columnconfigure(c, weight=1)
@@ -105,6 +118,47 @@ class App:
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
 
+
+    def install_browser(self) -> None:
+        if self.running:
+            return
+
+        self.running = True
+        self.search_btn.configure(state="disabled")
+        self.install_btn.configure(state="disabled")
+        self.status_var.set("브라우저 설치 중...")
+        self.log("브라우저 설치 시작 (최초 1회 필요)")
+
+        thread = threading.Thread(target=self._install_browser_thread, daemon=True)
+        thread.start()
+
+    def _install_browser_thread(self) -> None:
+        try:
+            install_chromium(progress_callback=lambda msg: self.root.after(0, self.log, msg))
+            self.root.after(0, self.on_browser_install_done, None)
+        except Exception as exc:
+            self.root.after(0, self.on_browser_install_done, exc)
+
+    def on_browser_install_done(self, error: Exception | None) -> None:
+        self.running = False
+        self.search_btn.configure(state="normal")
+        self.install_btn.configure(state="normal")
+
+        if error is not None:
+            self.status_var.set("브라우저 설치 실패")
+            self.log(f"브라우저 설치 실패: {error}")
+            messagebox.showerror(
+                "브라우저 설치 실패",
+                "Playwright 브라우저 설치에 실패했습니다.\n"
+                "네트워크 상태를 확인한 뒤 다시 시도해 주세요.\n\n"
+                f"상세: {error}",
+            )
+            return
+
+        self.status_var.set("브라우저 설치 완료")
+        self.log("브라우저 설치 완료")
+        messagebox.showinfo("완료", "브라우저 설치가 완료되었습니다. 이제 검색을 시작하세요.")
+
     def start_search(self) -> None:
         if self.running:
             return
@@ -122,6 +176,7 @@ class App:
 
         self.running = True
         self.search_btn.configure(state="disabled")
+        self.install_btn.configure(state="disabled")
         self.status_var.set("전국 검색 진행 중...")
         self.log(f"검색 시작: '{keyword}' / 지역 {len(regions)}개")
 
@@ -148,6 +203,7 @@ class App:
     def on_search_done(self, items: list[Item], error: Exception | None) -> None:
         self.running = False
         self.search_btn.configure(state="normal")
+        self.install_btn.configure(state="normal")
 
         if error is not None:
             self.status_var.set("실패")
