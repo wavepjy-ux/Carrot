@@ -17,6 +17,13 @@ USER_AGENT = (
     "Chrome/126.0.0.0 Safari/537.36"
 )
 BASE_URL = "https://www.daangn.com/kr/buy-sell/"
+DEFAULT_HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.7,en;q=0.6",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+}
 
 
 @dataclass
@@ -38,6 +45,8 @@ class DaangnCrawler:
             html = self._fetch_page(keyword, page)
             parsed = self._parse_from_json_ld(html)
             if not parsed:
+                parsed = self._parse_from_next_data(html)
+            if not parsed:
                 parsed = self._parse_with_regex(html)
 
             if not parsed:
@@ -56,17 +65,62 @@ class DaangnCrawler:
 
         return results
 
+    def _parse_from_next_data(self, html: str):
+        match = re.search(
+            r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>',
+            html,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        if not match:
+            return []
+
+        try:
+            payload = json.loads(match.group(1).strip())
+        except json.JSONDecodeError:
+            return []
+
+        results = []
+        self._collect_listings_from_obj(payload, results)
+        return results
+
+    def _collect_listings_from_obj(self, obj, output):
+        if isinstance(obj, dict):
+            has_title = any(k in obj for k in ("title", "name"))
+            has_url = any(k in obj for k in ("url", "path", "link"))
+            if has_title and has_url:
+                raw_url = str(obj.get("url") or obj.get("path") or obj.get("link") or "").strip()
+                if raw_url:
+                    if raw_url.startswith("/"):
+                        raw_url = f"https://www.daangn.com{raw_url}"
+                    if "/buy-sell/articles/" in raw_url:
+                        title = str(obj.get("title") or obj.get("name") or "(제목 없음)").strip()
+                        price = (
+                            str(obj.get("priceString") or obj.get("price") or obj.get("priceText") or "가격 정보 없음")
+                            .strip()
+                        )
+                        location = (
+                            str(obj.get("regionName") or obj.get("dong") or obj.get("address") or "지역 정보 없음")
+                            .strip()
+                        )
+                        output.append(Listing(title=title, price=price, location=location, url=raw_url))
+
+            for value in obj.values():
+                self._collect_listings_from_obj(value, output)
+        elif isinstance(obj, list):
+            for item in obj:
+                self._collect_listings_from_obj(item, output)
+
     def _fetch_page(self, keyword: str, page: int) -> str:
         query = urllib.parse.urlencode({"in": "all", "search": keyword, "page": page})
         url = f"{BASE_URL}?{query}"
-        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        req = urllib.request.Request(url, headers=DEFAULT_HEADERS)
         with urllib.request.urlopen(req, timeout=self.timeout) as response:
             return response.read().decode("utf-8", errors="ignore")
 
     def _parse_from_json_ld(self, html: str):
         results = []
         blocks = re.findall(
-            r'<script[^>]+type="application/ld\\+json"[^>]*>(.*?)</script>',
+            r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>',
             html,
             flags=re.DOTALL | re.IGNORECASE,
         )
@@ -114,7 +168,7 @@ class DaangnCrawler:
     def _parse_with_regex(self, html: str):
         results = []
         pattern = re.compile(
-            r'<a[^>]+href="(?P<href>/kr/buy-sell/articles/\\d+)"[^>]*>(?P<body>.*?)</a>',
+            r'<a[^>]+href="(?P<href>/kr/buy-sell/articles/\d+)"[^>]*>(?P<body>.*?)</a>',
             re.DOTALL | re.IGNORECASE,
         )
         for match in pattern.finditer(html):
@@ -137,7 +191,7 @@ class DaangnCrawler:
     @staticmethod
     def _strip_html(text: str) -> str:
         text = re.sub(r"<[^>]+>", " ", text)
-        return unescape(re.sub(r"\\s+", " ", text)).strip()
+        return unescape(re.sub(r"\s+", " ", text)).strip()
 
 
 class App:
