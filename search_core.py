@@ -8,6 +8,7 @@ import csv
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from dataclasses import asdict, dataclass
@@ -31,12 +32,36 @@ def get_playwright_browser_path() -> Path:
     return Path.home() / ".daangn_playwright_browsers"
 
 
+def _playwright_cli_base_cmd() -> list[str]:
+    """Playwright CLI 호출용 기본 명령을 반환합니다."""
+    if not getattr(sys, "frozen", False):
+        return [sys.executable, "-m", "playwright"]
+
+    # EXE 실행 시 sys.executable은 현재 GUI exe이므로,
+    # python -m playwright를 직접 실행해야 동일 GUI 재실행 문제가 없습니다.
+    candidates = (
+        ["py", "-m", "playwright"],
+        ["python", "-m", "playwright"],
+        ["python3", "-m", "playwright"],
+    )
+    for cmd in candidates:
+        if shutil.which(cmd[0]):
+            return cmd
+
+    raise RuntimeError(
+        "Python 실행 파일을 찾지 못했습니다. "
+        "PowerShell에서 `python -m pip install -r requirements.txt` 후 "
+        "`python -m playwright install chromium`를 먼저 실행해 주세요."
+    )
+
+
 def install_chromium(progress_callback: Callable[[str], None] | None = None) -> None:
     """Playwright Chromium 브라우저 설치."""
     env = os.environ.copy()
     env["PLAYWRIGHT_BROWSERS_PATH"] = str(get_playwright_browser_path())
 
-    cmd = [sys.executable, "-m", "playwright", "install", "chromium"]
+    base_cmd = _playwright_cli_base_cmd()
+    cmd = [*base_cmd, "install", "chromium"]
     if progress_callback:
         progress_callback("Playwright Chromium 설치를 시작합니다...")
     subprocess.run(cmd, check=True, env=env)
@@ -228,7 +253,7 @@ async def run_search(
             if "Executable doesn't exist" in message or "Please run the following command" in message:
                 raise RuntimeError(
                     "Playwright Chromium 브라우저가 설치되지 않았습니다. "
-                    "GUI에서 '브라우저 설치' 버튼을 먼저 눌러 설치해 주세요."
+                    "GUI에서 '브라우저 설치' 버튼을 눌러 설치하거나, `python -m playwright install chromium`를 실행해 주세요."
                 ) from exc
             raise
         context = await browser.new_context(locale="ko-KR")

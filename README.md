@@ -78,6 +78,9 @@ python build_exe.py
 - `pip ... 인식되지 않음` → `python -m pip ...` 사용
 - `No module named playwright` → `python -m pip install -r requirements.txt` 먼저 실행
 - `PyInstaller가 설치되어 있지 않습니다` → 위와 동일하게 requirements 설치
+- `브라우저 설치`를 눌렀는데 GUI가 하나 더 뜸
+  - 원인: EXE에서 `sys.executable -m playwright`를 호출하면 자기 자신(GUI EXE)이 다시 실행될 수 있음
+  - 해결: 최신 버전으로 업데이트 후 다시 시도 (수정됨)
 - `BrowserType.launch: Executable doesn't exist ...`
   - 원인: Playwright Chromium 브라우저가 설치되지 않았거나 경로가 꼬인 상태
   - 해결 1: GUI에서 `브라우저 설치` 버튼 클릭
