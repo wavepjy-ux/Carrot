@@ -13,7 +13,7 @@ import subprocess
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Sequence
 
 BASE_URL = "https://www.daangn.com/kr/buy-sell/"
 SKIP_STATUS_KEYWORDS = ("판매완료", "거래완료", "예약중", "예약", "완료")
@@ -32,27 +32,28 @@ def get_playwright_browser_path() -> Path:
     return Path.home() / ".daangn_playwright_browsers"
 
 
-def _playwright_cli_base_cmd() -> list[str]:
-    """Playwright CLI 호출용 기본 명령을 반환합니다."""
+def _playwright_cli_candidates() -> list[list[str]]:
+    """Playwright CLI 후보 명령 목록."""
     if not getattr(sys, "frozen", False):
-        return [sys.executable, "-m", "playwright"]
+        return [[sys.executable, "-m", "playwright"]]
 
-    # EXE 실행 시 sys.executable은 현재 GUI exe이므로,
-    # python -m playwright를 직접 실행해야 동일 GUI 재실행 문제가 없습니다.
-    candidates = (
+    candidates = [
         ["py", "-m", "playwright"],
         ["python", "-m", "playwright"],
         ["python3", "-m", "playwright"],
-    )
-    for cmd in candidates:
-        if shutil.which(cmd[0]):
-            return cmd
+    ]
+    return [cmd for cmd in candidates if shutil.which(cmd[0])]
 
-    raise RuntimeError(
-        "Python 실행 파일을 찾지 못했습니다. "
-        "PowerShell에서 `python -m pip install -r requirements.txt` 후 "
-        "`python -m playwright install chromium`를 먼저 실행해 주세요."
-    )
+
+def _pip_cmd_from_playwright_cmd(playwright_cmd: Sequence[str]) -> list[str]:
+    """playwright CLI 명령에 대응하는 pip 명령."""
+    return [playwright_cmd[0], "-m", "pip", "install", "playwright"]
+
+
+def _has_playwright_module(playwright_cmd: Sequence[str], env: dict[str, str]) -> bool:
+    check_cmd = [*playwright_cmd, "--version"]
+    proc = subprocess.run(check_cmd, env=env, capture_output=True, text=True)
+    return proc.returncode == 0
 
 
 def install_chromium(progress_callback: Callable[[str], None] | None = None) -> None:
@@ -60,13 +61,42 @@ def install_chromium(progress_callback: Callable[[str], None] | None = None) -> 
     env = os.environ.copy()
     env["PLAYWRIGHT_BROWSERS_PATH"] = str(get_playwright_browser_path())
 
-    base_cmd = _playwright_cli_base_cmd()
-    cmd = [*base_cmd, "install", "chromium"]
-    if progress_callback:
-        progress_callback("Playwright Chromium 설치를 시작합니다...")
-    subprocess.run(cmd, check=True, env=env)
-    if progress_callback:
-        progress_callback("Playwright Chromium 설치 완료")
+    candidates = _playwright_cli_candidates()
+    if not candidates:
+        raise RuntimeError(
+            "Python 실행 파일을 찾지 못했습니다. "
+            "PowerShell에서 Python 설치 후 `python -m pip install playwright`를 실행해 주세요."
+        )
+
+    last_error: Exception | None = None
+    for base_cmd in candidates:
+        try:
+            if progress_callback:
+                progress_callback(f"Playwright 점검: {' '.join(base_cmd)}")
+
+            if not _has_playwright_module(base_cmd, env):
+                pip_cmd = _pip_cmd_from_playwright_cmd(base_cmd)
+                if progress_callback:
+                    progress_callback(f"Playwright 모듈 설치: {' '.join(pip_cmd)}")
+                subprocess.run(pip_cmd, check=True, env=env)
+
+            cmd = [*base_cmd, "install", "chromium"]
+            if progress_callback:
+                progress_callback(f"Playwright Chromium 설치 실행: {' '.join(cmd)}")
+            subprocess.run(cmd, check=True, env=env)
+            if progress_callback:
+                progress_callback("Playwright Chromium 설치 완료")
+            return
+        except Exception as exc:
+            last_error = exc
+            continue
+
+    raise RuntimeError(
+        "Chromium 설치에 실패했습니다. PowerShell에서 아래 명령을 순서대로 실행해 주세요.\n"
+        "1) python -m pip install --upgrade pip\n"
+        "2) python -m pip install playwright\n"
+        "3) python -m playwright install chromium"
+    ) from last_error
 
 
 def resolve_default_regions_path(path: str) -> Path:

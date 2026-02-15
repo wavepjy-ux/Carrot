@@ -81,6 +81,12 @@ python build_exe.py
 - `브라우저 설치`를 눌렀는데 GUI가 하나 더 뜸
   - 원인: EXE에서 `sys.executable -m playwright`를 호출하면 자기 자신(GUI EXE)이 다시 실행될 수 있음
   - 해결: 최신 버전으로 업데이트 후 다시 시도 (수정됨)
+- `브라우저 설치 실패: Command ['py', ...] returned non-zero exit status 1.`
+  - 원인: `py` 기본 파이썬에 playwright 모듈이 없거나 환경이 다른 경우
+  - 해결: 최신 버전에서는 자동으로 `python/py` 후보를 순차 시도하고 playwright 설치를 보완합니다.
+    그래도 실패하면 PowerShell에서 아래를 직접 실행하세요.
+    `python -m pip install playwright`
+    `python -m playwright install chromium`
 - `BrowserType.launch: Executable doesn't exist ...`
   - 원인: Playwright Chromium 브라우저가 설치되지 않았거나 경로가 꼬인 상태
   - 해결 1: GUI에서 `브라우저 설치` 버튼 클릭
