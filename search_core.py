@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
 BASE_URL = "https://www.daangn.com/kr/buy-sell/"
-SKIP_STATUS_KEYWORDS = ("판매완료", "거래완료", "예약중", "예약", "완료")
+SKIP_STATUS_KEYWORDS = ("판매완료", "거래완료", "예약중")
 
 
 @dataclass(slots=True)
@@ -284,38 +284,39 @@ def is_selling(text: str) -> bool:
 
 
 async def collect_items(page: Any, region: str) -> list[Item]:
-    card_selectors = (
-        "article",
-        "li article",
-        "a[data-gtm*='search']",
-        "main a[href*='/articles/']",
-    )
-
-    cards = []
-    for selector in card_selectors:
-        locator = page.locator(selector)
-        count = await locator.count()
-        if count > 0:
-            cards = [locator.nth(i) for i in range(count)]
-            break
+    # 검색 결과는 a[href*="/articles/"] 형태가 비교적 안정적
+    anchors = page.locator("main a[href*='/articles/']")
+    count = await anchors.count()
 
     items: list[Item] = []
-    for card in cards:
-        full_text = (await card.inner_text()).strip()
-        if not full_text or not is_selling(full_text):
+    seen_links_local: set[str] = set()
+
+    for i in range(count):
+        anchor = anchors.nth(i)
+
+        href = await anchor.get_attribute("href")
+        if not href:
+            continue
+        link = f"https://www.daangn.com{href}" if href.startswith("/") else href
+        if link in seen_links_local:
+            continue
+        seen_links_local.add(link)
+
+        full_text = (await anchor.inner_text()).strip()
+        if not full_text:
             continue
 
-        link = await card.locator("a").first.get_attribute("href") if await card.locator("a").count() else None
-        if not link:
-            link = await card.get_attribute("href")
-        if not link:
+        # 판매완료/거래완료/예약중 명시 텍스트만 제외
+        if not is_selling(full_text):
             continue
-        if link.startswith("/"):
-            link = f"https://www.daangn.com{link}"
 
         title = re.split(r"\n+", full_text)[0].strip()
+        if not title:
+            title = "(제목 없음)"
+
         price_match = re.search(r"([\d,]+\s*원|나눔|무료)", full_text)
         price = price_match.group(1) if price_match else "가격 정보 없음"
+
         items.append(Item(region=region, title=title, price=price, link=link))
 
     return items
@@ -357,6 +358,9 @@ async def run_search(
                 await page.wait_for_timeout(delay_ms)
                 await change_region(page, region, delay_ms)
                 await search_keyword(page, keyword, delay_ms)
+                # 검색 결과 추가 로딩 유도
+                await page.mouse.wheel(0, 1800)
+                await page.wait_for_timeout(700)
                 items = await collect_items(page, region)
                 add_count = 0
                 for item in items:
