@@ -54,11 +54,21 @@ class DaangnCrawler:
                 results.append(item)
 
         if include_sitemap_boost or sitemap_only:
-            for item in self._search_from_sitemap(keyword, max_pages):
+            sitemap_results = self._search_from_sitemap(keyword, max_pages)
+            for item in sitemap_results:
                 if item.url in dedupe:
                     continue
                 dedupe.add(item.url)
                 results.append(item)
+
+            # 전국만 모드인데 사이트맵 수집이 0건이면, 완전 0건 방지를 위해 지역확장 검색으로 폴백
+            if sitemap_only and not sitemap_results:
+                for item in self._search_from_daangn(keyword, max_pages, region_expand=True):
+                    if item.url in dedupe:
+                        continue
+                    item.source = "daangn-fallback"
+                    dedupe.add(item.url)
+                    results.append(item)
 
         return results
 
@@ -157,30 +167,51 @@ class DaangnCrawler:
 
     def _discover_sitemap_urls(self):
         candidates = [
+            "https://www.daangn.com/robots.txt",
             "https://www.daangn.com/sitemap.xml",
             "https://www.daangn.com/sitemap_index.xml",
             "https://www.daangn.com/sitemaps/sitemap-index.xml",
         ]
 
         discovered = []
+
+        # 1) robots.txt의 Sitemap 항목 우선 활용
+        try:
+            robots = self._fetch_url_text("https://www.daangn.com/robots.txt")
+            for line in robots.splitlines():
+                if line.lower().startswith("sitemap:"):
+                    u = line.split(":", 1)[1].strip()
+                    if u:
+                        discovered.append(u)
+        except Exception:
+            pass
+
+        # 2) 후보 sitemap index 파싱
         for url in candidates:
+            if not url.endswith(".xml"):
+                continue
             try:
                 xml_text = self._fetch_url_text(url)
             except Exception:
                 continue
 
             locs = [unescape(x.strip()) for x in re.findall(r"<loc>(.*?)</loc>", xml_text, flags=re.IGNORECASE)]
-            # sitemap index 내에서 article 관련 sitemap 우선
+            # index가 아니라 urlset(게시글 loc 직접 포함)일 수도 있으므로 원본 url도 유지
+            if "/kr/buy-sell/articles/" in xml_text:
+                discovered.append(url)
+
             article_first = [x for x in locs if "sitemap" in x.lower() and ("buy-sell" in x or "article" in x)]
             all_sitemaps = [x for x in locs if "sitemap" in x.lower()]
 
-            ordered = article_first + [x for x in all_sitemaps if x not in article_first]
-            discovered.extend(ordered)
+            discovered.extend(article_first)
+            discovered.extend([x for x in all_sitemaps if x not in article_first])
 
-            if discovered:
-                break
+        # fallback: 최소 후보 보장
+        discovered.extend([
+            "https://www.daangn.com/sitemap.xml",
+            "https://www.daangn.com/sitemap_index.xml",
+        ])
 
-        # 최신부터 오도록 역순 시도 (파일명이 날짜 오름차순인 경우 대비)
         uniq = []
         seen = set()
         for u in discovered:
@@ -517,7 +548,11 @@ class App:
                     for item in payload:
                         img = item.image_url if item.image_url else "(사진 없음)"
                         self.tree.insert("", END, values=(item.title, item.price, item.location, item.source, item.url, img))
-                    self.status_label.config(text=f"완료: {len(payload)}건")
+                    fallback_count = sum(1 for x in payload if x.source == "daangn-fallback")
+                    if fallback_count:
+                        self.status_label.config(text=f"완료: {len(payload)}건 (전국만 폴백 {fallback_count}건)")
+                    else:
+                        self.status_label.config(text=f"완료: {len(payload)}건")
                 else:
                     self.status_label.config(text="오류 발생")
                     messagebox.showerror("검색 실패", payload)
