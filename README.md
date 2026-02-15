@@ -87,6 +87,11 @@ python build_exe.py
     그래도 실패하면 PowerShell에서 아래를 직접 실행하세요.
     `python -m pip install playwright`
     `python -m playwright install chromium`
+- `지역 ... 선택 실패`가 반복됨
+  - 원인: 당근 지역 검색창은 `서울특별시 강남구` 같은 전체 행정명보다 `강남구` 형태를 우선 노출하는 경우가 있음
+  - 최신 버전에서는 자동으로 `전체명 → 뒤 2단어 → 마지막 단어` 순으로 재시도하고,
+    목록 첫 항목/키보드 선택까지 fallback 처리합니다.
+  - 그래도 실패하면 `regions.txt`를 `강남구`, `서초구`, `해운대구`처럼 짧게 바꿔 테스트해 주세요.
 - `BrowserType.launch: Executable doesn't exist ...`
   - 원인: Playwright Chromium 브라우저가 설치되지 않았거나 경로가 꼬인 상태
   - 해결 1: GUI에서 `브라우저 설치` 버튼 클릭

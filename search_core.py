@@ -178,23 +178,83 @@ async def change_region(page: Any, region: str, delay_ms: int) -> None:
     if text_input is None:
         raise RuntimeError("지역 검색 입력창을 찾지 못했습니다.")
 
-    await text_input.fill("")
-    await text_input.fill(region)
-    await page.wait_for_timeout(max(delay_ms, 800))
+    tokens = [t for t in region.split() if t]
+    candidates: list[str] = [region]
+    if len(tokens) >= 2:
+        candidates.append(" ".join(tokens[-2:]))
+    if tokens:
+        candidates.append(tokens[-1])
 
-    clicked_region = await safe_click(
-        page,
-        selectors=(
-            f"[role='option']:has-text('{region}')",
-            f"li:has-text('{region}')",
-            f"button:has-text('{region}')",
-            f"a:has-text('{region}')",
-        ),
-    )
-    if not clicked_region:
-        raise RuntimeError(f"지역 '{region}' 선택 실패")
+    # 중복 제거
+    seen: set[str] = set()
+    query_candidates = [c for c in candidates if not (c in seen or seen.add(c))]
 
-    await page.wait_for_timeout(delay_ms)
+    for query in query_candidates:
+        await text_input.fill("")
+        await text_input.fill(query)
+        await page.wait_for_timeout(max(delay_ms, 900))
+
+        # 1) 원본 지역명 정확 매칭
+        clicked_region = await safe_click(
+            page,
+            selectors=(
+                f"[role='option']:has-text('{region}')",
+                f"li:has-text('{region}')",
+                f"button:has-text('{region}')",
+                f"a:has-text('{region}')",
+            ),
+            timeout_ms=1_800,
+        )
+        if clicked_region:
+            await page.wait_for_timeout(delay_ms)
+            return
+
+        # 2) 현재 검색어로 매칭
+        clicked_query = await safe_click(
+            page,
+            selectors=(
+                f"[role='option']:has-text('{query}')",
+                f"li:has-text('{query}')",
+                f"button:has-text('{query}')",
+                f"a:has-text('{query}')",
+            ),
+            timeout_ms=1_800,
+        )
+        if clicked_query:
+            await page.wait_for_timeout(delay_ms)
+            return
+
+        # 3) 검색 결과의 첫 번째 후보 선택
+        first_option = None
+        for selector in (
+            "[role='dialog'] [role='option']",
+            "[role='listbox'] [role='option']",
+            "[role='dialog'] li",
+            "[aria-modal='true'] li",
+        ):
+            locator = page.locator(selector).first
+            if await locator.count() > 0:
+                first_option = locator
+                break
+
+        if first_option is not None:
+            try:
+                await first_option.click(timeout=1_800)
+                await page.wait_for_timeout(delay_ms)
+                return
+            except Exception:
+                pass
+
+        # 4) 키보드 선택 fallback
+        try:
+            await text_input.press("ArrowDown")
+            await text_input.press("Enter")
+            await page.wait_for_timeout(delay_ms)
+            return
+        except Exception:
+            continue
+
+    raise RuntimeError(f"지역 '{region}' 선택 실패")
 
 
 async def search_keyword(page: Any, keyword: str, delay_ms: int) -> None:
